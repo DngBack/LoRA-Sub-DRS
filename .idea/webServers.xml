@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="bd023cd1-49b7-4438-99c4-ec2168eae0b3" name="sysu">
+        <fileTransfer rootFolder="/home/share/liuxuan" accessType="SFTP" host="222.200.185.168" port="80" sshConfigId="b4d39810-03e8-49f8-b894-4b2c4bcd93b9" sshConfig="liuxuan@222.200.185.168:80 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
