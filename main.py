@@ -23,6 +23,7 @@ def setup_parser():
     parser.add_argument('--config', type=str, default='configs/finetune.json',
                         help='Json file of settings.')
     parser.add_argument('--device', type=str, default='0')
+    parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
 
     return parser
 

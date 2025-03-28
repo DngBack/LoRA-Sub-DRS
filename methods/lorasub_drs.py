@@ -50,6 +50,7 @@ class LoRAsub_DRS(BaseLearner):
         self.dataset = args["dataset"]
         self.fc_lrate = args["fc_lrate"]
         self.margin_inter = args["margin_inter"]
+        self.eval = args['eval']
         self._protos = []
 
         self.topk = 1  # origin is 5
@@ -83,9 +84,11 @@ class LoRAsub_DRS(BaseLearner):
 
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
-        self._train(self.train_loader, self.test_loader)
+        if not self.eval:
+            self._train(self.train_loader, self.test_loader)
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
+        self._build_protos()
 
     def _train(self, train_loader, test_loader):
         self._network.to(self._device)
@@ -150,7 +153,6 @@ class LoRAsub_DRS(BaseLearner):
                 self.run_epoch = self.epochs
 
         self.train_function(train_loader, test_loader)
-        self._build_protos()
 
         return
 
@@ -200,6 +202,7 @@ class LoRAsub_DRS(BaseLearner):
 
 
     def _build_protos(self):
+        self._network.to(self._device)
         with torch.no_grad():
             for class_idx in range(self._known_classes, self._total_classes):
                 data, targets, idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx + 1),

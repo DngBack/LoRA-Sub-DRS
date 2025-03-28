@@ -57,6 +57,16 @@ def _train(args):
         logging.info('All params: {}'.format(count_parameters(model._network)))
         logging.info('Trainable params: {}'.format(count_parameters(model._network, True)))
         time_start = time.time()
+        if args['eval']:
+            checkpoint_path = os.path.join(logfilename, 'task_{}.pth'.format(int(task)))
+            if os.path.exists(checkpoint_path):
+                print('Loading checkpoint from:', checkpoint_path)
+                checkpoint = torch.load(checkpoint_path, map_location=args['device'][0])
+                model._network.load_state_dict(checkpoint)
+            else:
+                print('No checkpoint found at:', checkpoint_path)
+                return
+
         model.incremental_train(data_manager)
         time_end = time.time()
         logging.info('Time:{}'.format(time_end - time_start))
@@ -72,17 +82,9 @@ def _train(args):
         print('Average Accuracy:', sum(acc_curve["top1"])/len(acc_curve["top1"]))
         logging.info("Average Accuracy: {}".format(sum(acc_curve["top1"])/len(acc_curve["top1"])))
 
-        # torch.save(model._network.state_dict(), os.path.join(logfilename, "task_{}.pth".format(int(task))))
+        # if not args['eval']:
+        #     torch.save(model._network.state_dict(), os.path.join(logfilename, "task_{}.pth".format(int(task))))
 
-
-
-
-# def _set_device(args):
-#     device_type = args["device"]
-#     gpus = []
-#     device= torch.device("cuda")
-#     gpus.append(device)
-#     args["device"] = gpus
 
 
 def _set_device(args):
