@@ -19,6 +19,7 @@ import re
 from collections import defaultdict
 from utils.losses import AugmentedTripletLoss
 from scipy.spatial.distance import cdist
+from utils.fisher_utils import FisherManager, compute_diagonal_fim, compute_lambda_star, adaptive_merge_parameters
 
 
 
@@ -58,6 +59,11 @@ class LoRAsub_DRS(BaseLearner):
         self.debug = False
         self.fea_in = defaultdict(dict)
 
+        # AD-DRS specific components
+        self.fisher_manager = FisherManager()
+        self.theta_t_minus_1_star = None  # Previous task's final parameters
+        self.lambda_history = []  # Track lambda values for analysis
+
         for module in self._network.modules():
             if isinstance(module, Attention_LoRA):
                 module.init_param()
@@ -91,8 +97,23 @@ class LoRAsub_DRS(BaseLearner):
         self._build_protos()
 
     def _train(self, train_loader, test_loader):
+        """
+        AD-DRS Training Pipeline:
+        Step 1: Plasticity-Search Training in DRS (produces candidate model)
+        Step 2: Adaptive Merging to find optimal balance
+        """
         self._network.to(self._device)
 
+        # Store previous task's final parameters (Step 1 preparation)
+        if self._cur_task > 0 and self.theta_t_minus_1_star is None:
+            self.theta_t_minus_1_star = {name: p.clone().detach() 
+                                       for name, p in self._network.named_parameters() 
+                                       if p.requires_grad}
+            logging.info(f"Stored theta_t_minus_1_star with {len(self.theta_t_minus_1_star)} parameters")
+
+        # STEP 1: PLASTICITY-SEARCH TRAINING IN DRS
+        logging.info(f"=== AD-DRS Step 1: Plasticity-Search Training for Task {self._cur_task} ===")
+        
         for name, param in self._network.named_parameters():
             param.requires_grad_(False)
             try:
@@ -152,9 +173,85 @@ class LoRAsub_DRS(BaseLearner):
                 self.update_optim_transforms()
                 self.run_epoch = self.epochs
 
+        # Perform plasticity-search training (produces candidate model)
         self.train_function(train_loader, test_loader)
+        
+        # STEP 2: ADAPTIVE MERGING
+        if self._cur_task > 0:
+            logging.info(f"=== AD-DRS Step 2: Adaptive Merging for Task {self._cur_task} ===")
+            self.adaptive_merge_step(train_loader)
 
         return
+
+    def adaptive_merge_step(self, train_loader):
+        """
+        Implement Step 2 of AD-DRS: Adaptive Merging to find optimal balance.
+        """
+        # Get candidate model parameters (result of Step 1)
+        theta_t_cand = {name: p.clone().detach() 
+                       for name, p in self._network.named_parameters() 
+                       if p.requires_grad and name in self.theta_t_minus_1_star}
+        
+        logging.info(f"Computing Fisher Information Matrix for current task...")
+        
+        # Compute FIM for current task with candidate model
+        current_fim = compute_diagonal_fim(self._network, train_loader, self._device)
+        
+        # Get accumulated FIM from previous tasks
+        accumulated_fim = self.fisher_manager.get_fisher()
+        
+        if not accumulated_fim:
+            # First task after initial - no merging needed
+            logging.info("No previous FIM found, skipping adaptive merging")
+            lambda_star = torch.tensor(1.0)
+        else:
+            # Check if using fixed lambda for ablation studies
+            if hasattr(self, 'fixed_lambda') and self.fixed_lambda is not None:
+                lambda_star = torch.tensor(float(self.fixed_lambda))
+                logging.info(f"Using fixed lambda = {lambda_star.item():.6f} (ablation study)")
+            else:
+                # Calculate optimal lambda using Bayesian merging theory
+                lambda_star = compute_lambda_star(
+                    self.theta_t_minus_1_star, 
+                    theta_t_cand, 
+                    current_fim, 
+                    accumulated_fim
+                )
+                logging.info(f"Computed adaptive lambda_star = {lambda_star.item():.6f}")
+        
+        self.lambda_history.append(lambda_star.item())
+        
+        # Log to analyzer if available
+        if hasattr(self, 'analyzer'):
+            self.analyzer.log_lambda_value(self._cur_task, lambda_star.item())
+        
+        # Perform adaptive parameter merging
+        if lambda_star.item() < 1.0:  # Only merge if lambda < 1
+            final_theta = adaptive_merge_parameters(
+                self.theta_t_minus_1_star,
+                theta_t_cand,
+                lambda_star
+            )
+            
+            # Load merged parameters back into model
+            current_state = self._network.state_dict()
+            for name, param in final_theta.items():
+                if name in current_state:
+                    current_state[name] = param
+            
+            self._network.load_state_dict(current_state, strict=False)
+            logging.info("Applied adaptive parameter merging")
+        else:
+            logging.info("lambda_star >= 1.0, keeping candidate model")
+        
+        # Update Fisher manager with final model's FIM
+        final_fim = compute_diagonal_fim(self._network, train_loader, self._device)
+        self.fisher_manager.update_fisher(final_fim)
+        
+        # Store current final parameters for next task
+        self.theta_t_minus_1_star = {name: p.clone().detach() 
+                                   for name, p in self._network.named_parameters() 
+                                   if p.requires_grad}
 
     def train_function(self, train_loader, test_loader):
         prog_bar = tqdm(range(self.run_epoch))
