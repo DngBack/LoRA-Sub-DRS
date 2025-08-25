@@ -5,14 +5,13 @@ Training script for DRS-Hyperspherical method
 
 This script provides comprehensive training capabilities for the DRS-Hyperspherical
 continual learning method, including:
-- YAML configuration support
+- JSON configuration support
 - Comprehensive logging and analysis
 - Ablation study generation
 - Automatic experiment management
 """
 
 import argparse
-import yaml
 import json
 import os
 import sys
@@ -59,16 +58,13 @@ def setup_logging(config: dict) -> str:
 
 
 def load_config(config_path: str) -> dict:
-    """Load configuration from YAML or JSON file"""
+    """Load configuration from JSON file"""
 
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    with open(config_path, "r") as f:
-        if config_path.endswith((".yaml", ".yml")):
-            config = yaml.safe_load(f)
-        else:
-            config = json.load(f)
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
 
     logging.info(f"Configuration loaded from: {config_path}")
     return config
@@ -112,9 +108,9 @@ def setup_experiment_environment(config: dict) -> dict:
     os.makedirs(experiment_dir, exist_ok=True)
 
     # Save configuration to experiment directory
-    config_save_path = os.path.join(experiment_dir, "config.yaml")
-    with open(config_save_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, indent=2)
+    config_save_path = os.path.join(experiment_dir, "config.json")
+    with open(config_save_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
     logging.info(f"Experiment directory created: {experiment_dir}")
     logging.info(f"Configuration saved: {config_save_path}")
@@ -127,69 +123,111 @@ def setup_experiment_environment(config: dict) -> dict:
 
 
 def convert_config_for_trainer(config: dict) -> dict:
-    """Convert YAML config structure to format expected by trainer"""
+    """Convert JSON config structure to format expected by trainer"""
 
-    # Start with flattened config
-    trainer_config = flatten_config(config)
+    trainer_config = {}
 
-    # Handle special mappings for backwards compatibility
-    mapping = {
-        # Model settings
-        "model_backbone": "backbone",
-        "model_net_type": "net_type",
-        "model_model_name": "model_name",
-        "model_embd_dim": "embd_dim",
-        "model_class_num": "class_num",
-        # LoRA settings
-        "lora_rank": "lora_rank",
-        "lora_alpha": "lora_alpha",
-        "lora_dropout": "lora_dropout",
-        # Dataset settings
-        "dataset_name": "dataset",
-        "dataset_init_cls": "init_cls",
-        "dataset_increment": "increment",
-        "dataset_total_sessions": "total_sessions",
-        # Training settings
-        "train_batch_size": "batch_size",
-        "train_lr": "lrate",
-        "train_init_lr": "init_lr",
-        "train_fc_lrate": "fc_lrate",
-        "train_weight_decay": "weight_decay",
-        "train_epochs": "epochs",
-        "train_init_epoch": "init_epoch",
-        "train_optim": "optim",
-        # Hardware settings
-        "device_gpu_id": "device",
-        "device_num_workers": "num_workers",
-        "device_multiple_gpus": "multiple_gpus",
-        # Loss settings
-        "loss_lambada": "lambada",
-        "loss_margin_inter": "margin_inter",
-        # Experimental settings
-        "experiment_eval": "eval",
-        "experiment_debug": "debug",
-        "advanced_EPSILON": "EPSILON",
-    }
+    # ========== BASIC SETTINGS ==========
+    trainer_config["seed"] = [config.get("seed", 1337)]  # trainer expects a list
 
-    # Apply mappings
-    for yaml_key, trainer_key in mapping.items():
-        if yaml_key in trainer_config:
-            trainer_config[trainer_key] = trainer_config[yaml_key]
+    # ========== MODEL SETTINGS ==========
+    model_config = config.get("model", {})
+    trainer_config["backbone"] = model_config.get("backbone", "vit_b16")
+    trainer_config["net_type"] = model_config.get("net_type", "sip")
+    trainer_config["model_name"] = model_config.get("model_name", "drs_hyperspherical")
+    trainer_config["embd_dim"] = model_config.get("embd_dim", 768)
+    trainer_config["class_num"] = model_config.get("class_num", 5)
 
-    # Ensure required fields have defaults
-    defaults = {
-        "net_type": "sip",
-        "model_name": "drs_hyperspherical",
-        "device": "0",
-        "multiple_gpus": [],
-        "eval": False,
-        "debug": False,
-        "EPSILON": 1e-8,
-    }
+    # ========== LORA SETTINGS ==========
+    lora_config = config.get("lora", {})
+    trainer_config["lora_rank"] = lora_config.get("rank", 16)
+    trainer_config["lora_alpha"] = lora_config.get("alpha", 16)
+    trainer_config["lora_dropout"] = lora_config.get("dropout", 0.0)
 
-    for key, default_value in defaults.items():
-        if key not in trainer_config:
-            trainer_config[key] = default_value
+    # ========== DATASET SETTINGS ==========
+    dataset_config = config.get("dataset", {})
+    trainer_config["dataset"] = dataset_config.get("name", "cifar100")
+    trainer_config["init_cls"] = dataset_config.get("init_cls", 50)
+    trainer_config["increment"] = dataset_config.get("increment", 5)
+    trainer_config["total_sessions"] = dataset_config.get("total_sessions", 11)
+
+    # ========== TRAINING SETTINGS ==========
+    train_config = config.get("train", {})
+    trainer_config["epochs_warm"] = train_config.get("epochs_warm", 4)
+    trainer_config["epochs_main"] = train_config.get("epochs_main", 26)
+    trainer_config["epochs"] = train_config.get("epochs", 30)
+    trainer_config["init_epoch"] = train_config.get("init_epoch", 20)
+    trainer_config["batch_size"] = train_config.get("batch_size", 128)
+    trainer_config["lrate"] = train_config.get("lr", 0.001)
+    trainer_config["init_lr"] = train_config.get("init_lr", 0.001)
+    trainer_config["fc_lrate"] = train_config.get("fc_lrate", 0.001)
+    trainer_config["weight_decay"] = train_config.get("weight_decay", 1e-5)
+    trainer_config["lrate_decay"] = train_config.get("lrate_decay", 0.1)
+    trainer_config["init_lr_decay"] = train_config.get("init_lr_decay", 0.1)
+    trainer_config["optim"] = train_config.get("optim", "AdamProj")
+    trainer_config["ema_momentum"] = train_config.get("ema_momentum", 0.97)
+
+    # ========== SPHERICAL GEOMETRY SETTINGS ==========
+    spherical_config = config.get("spherical", {})
+    trainer_config["per_class_prototypes"] = spherical_config.get(
+        "per_class_prototypes", True
+    )
+    trainer_config["multi_anchor"] = spherical_config.get("multi_anchor", False)
+    trainer_config["num_anchors"] = spherical_config.get("num_anchors", 3)
+    trainer_config["pca_energy"] = spherical_config.get("pca_energy", 0.90)
+    trainer_config["k_max"] = spherical_config.get("k_max", 128)
+
+    # ========== LOSS SETTINGS ==========
+    loss_config = config.get("loss", {})
+    trainer_config["s_start"] = loss_config.get("s_start", 10.0)
+    trainer_config["s_end"] = loss_config.get("s_end", 30.0)
+    trainer_config["m_start"] = loss_config.get("m_start", 0.0)
+    trainer_config["m_end"] = loss_config.get("m_end", 0.2)
+    trainer_config["triplet_lambda"] = loss_config.get("triplet_lambda", 0.5)
+    trainer_config["triplet_margin"] = loss_config.get("triplet_margin", 0.2)
+    trainer_config["triplet_mining"] = loss_config.get("triplet_mining", "hard")
+    trainer_config["label_smoothing"] = loss_config.get("label_smoothing", 0.05)
+    trainer_config["lambada"] = loss_config.get(
+        "lambada", 0.5
+    )  # Original LoRA-Sub loss weight
+    trainer_config["margin_inter"] = loss_config.get("margin_inter", 0.5)
+
+    # ========== DEVICE SETTINGS ==========
+    device_config = config.get("device", {})
+    trainer_config["device"] = device_config.get("gpu_id", "0")
+    trainer_config["num_workers"] = device_config.get("num_workers", 4)
+    trainer_config["multiple_gpus"] = device_config.get("multiple_gpus", [])
+
+    # ========== EXPERIMENT SETTINGS ==========
+    experiment_config = config.get("experiment", {})
+    trainer_config["eval"] = experiment_config.get("eval", False)
+    trainer_config["debug"] = experiment_config.get("debug", False)
+    trainer_config["prefix"] = experiment_config.get("prefix", "DRS-Hyperspherical")
+
+    # ========== ADVANCED SETTINGS ==========
+    advanced_config = config.get("advanced", {})
+    trainer_config["EPSILON"] = advanced_config.get("EPSILON", 1e-8)
+    trainer_config["fixed_lambda"] = advanced_config.get("fixed_lambda", None)
+    trainer_config["use_classifier_alignment"] = advanced_config.get(
+        "use_classifier_alignment", False
+    )
+    trainer_config["use_self_distillation"] = advanced_config.get(
+        "use_self_distillation", False
+    )
+    trainer_config["shuffle"] = advanced_config.get("shuffle", True)
+
+    # ========== LOG CONFIGURATION MAPPING ==========
+    logging.info("=== Configuration Mapping ===")
+    logging.info(f"Model: {trainer_config['model_name']}")
+    logging.info(f"Dataset: {trainer_config['dataset']}")
+    logging.info(f"Device: {trainer_config['device']}")
+    logging.info(f"Batch size: {trainer_config['batch_size']}")
+    logging.info(f"Learning rate: {trainer_config['lrate']}")
+    logging.info(f"Epochs: {trainer_config['epochs']}")
+    logging.info(f"LoRA rank: {trainer_config['lora_rank']}")
+    logging.info(f"PCA energy: {trainer_config['pca_energy']}")
+    logging.info(f"EMA momentum: {trainer_config['ema_momentum']}")
+    logging.info("============================")
 
     return trainer_config
 
@@ -268,8 +306,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/drs_hyperspherical_cifar100.yaml",
-        help="Path to configuration file (YAML or JSON)",
+        default="configs/drs_hyperspherical_cifar100.json",
+        help="Path to configuration file (JSON format)",
     )
 
     parser.add_argument(

@@ -1,0 +1,78 @@
+{
+  "seed": 1337,
+  "model": {
+    "backbone": "vit_b16",
+    "net_type": "sip",
+    "model_name": "drs_hyperspherical",
+    "embd_dim": 768,
+    "class_num": 5
+  },
+  "lora": {
+    "rank": 16,
+    "alpha": 16,
+    "dropout": 0.0
+  },
+  "dataset": {
+    "name": "cifar100",
+    "init_cls": 50,
+    "increment": 5,
+    "total_sessions": 11
+  },
+  "train": {
+    "epochs_warm": 4,
+    "epochs_main": 26,
+    "init_epoch": 20,
+    "epochs": 30,
+    "batch_size": 128,
+    "lr": 0.001,
+    "init_lr": 0.001,
+    "fc_lrate": 0.001,
+    "weight_decay": 0.00001,
+    "lrate_decay": 0.1,
+    "init_lr_decay": 0.1,
+    "optim": "AdamProj",
+    "ema_momentum": 0.97
+  },
+  "spherical": {
+    "per_class_prototypes": true,
+    "multi_anchor": false,
+    "num_anchors": 3,
+    "pca_energy": 0.90,
+    "k_max": 128
+  },
+  "loss": {
+    "s_start": 10.0,
+    "s_end": 30.0,
+    "m_start": 0.0,
+    "m_end": 0.2,
+    "triplet_lambda": 0.5,
+    "triplet_margin": 0.2,
+    "triplet_mining": "hard",
+    "label_smoothing": 0.05,
+    "lambada": 0.5,
+    "margin_inter": 0.5
+  },
+  "device": {
+    "gpu_id": "0",
+    "num_workers": 4,
+    "multiple_gpus": []
+  },
+  "logging": {
+    "eval_interval": 1,
+    "save_prototypes": true,
+    "save_U": true,
+    "save_path": "./experiments/"
+  },
+  "experiment": {
+    "prefix": "DRS-Hyperspherical",
+    "eval": false,
+    "debug": false
+  },
+  "advanced": {
+    "EPSILON": 0.00000001,
+    "fixed_lambda": null,
+    "use_classifier_alignment": false,
+    "use_self_distillation": false,
+    "shuffle": true
+  }
+}

@@ -12,7 +12,6 @@ Provides comprehensive analysis tools including:
 
 import os
 import json
-import yaml
 import shutil
 import matplotlib.pyplot as plt
 import numpy as np
@@ -244,11 +243,8 @@ class AblationStudyGenerator:
         os.makedirs(output_dir, exist_ok=True)
 
         # Load base configuration
-        with open(base_config_path, "r") as f:
-            if base_config_path.endswith(".yaml") or base_config_path.endswith(".yml"):
-                self.base_config = yaml.safe_load(f)
-            else:
-                self.base_config = json.load(f)
+        with open(base_config_path, "r", encoding="utf-8") as f:
+            self.base_config = json.load(f)
 
     def generate_ablation_configs(self) -> List[str]:
         """Generate all ablation study configurations"""
@@ -256,44 +252,44 @@ class AblationStudyGenerator:
 
         # 1. Baseline LoRA-Sub (Linear DRS)
         baseline_config = self._create_baseline_config()
-        baseline_path = os.path.join(self.output_dir, "baseline_lorasub.yaml")
+        baseline_path = os.path.join(self.output_dir, "baseline_lorasub.json")
         self._save_config(baseline_config, baseline_path)
         generated_configs.append(baseline_path)
 
         # 2. Riemannian-only (without DRS subspace projection)
         riemann_only_config = self._create_riemannian_only_config()
-        riemann_path = os.path.join(self.output_dir, "riemann_only.yaml")
+        riemann_path = os.path.join(self.output_dir, "riemann_only.json")
         self._save_config(riemann_only_config, riemann_path)
         generated_configs.append(riemann_path)
 
         # 3. Without DRS subspace (no PCA projection)
         no_drs_config = self._create_no_drs_config()
-        no_drs_path = os.path.join(self.output_dir, "no_drs_projection.yaml")
+        no_drs_path = os.path.join(self.output_dir, "no_drs_projection.json")
         self._save_config(no_drs_config, no_drs_path)
         generated_configs.append(no_drs_path)
 
         # 4. Without Angular Triplet
         no_triplet_config = self._create_no_triplet_config()
-        no_triplet_path = os.path.join(self.output_dir, "no_angular_triplet.yaml")
+        no_triplet_path = os.path.join(self.output_dir, "no_angular_triplet.json")
         self._save_config(no_triplet_config, no_triplet_path)
         generated_configs.append(no_triplet_path)
 
         # 5. Without EMA (fixed prototypes)
         no_ema_config = self._create_no_ema_config()
-        no_ema_path = os.path.join(self.output_dir, "no_ema_prototypes.yaml")
+        no_ema_path = os.path.join(self.output_dir, "no_ema_prototypes.json")
         self._save_config(no_ema_config, no_ema_path)
         generated_configs.append(no_ema_path)
 
         # 6. Without warmup & annealing
         no_warmup_config = self._create_no_warmup_config()
-        no_warmup_path = os.path.join(self.output_dir, "no_warmup_anneal.yaml")
+        no_warmup_path = os.path.join(self.output_dir, "no_warmup_anneal.json")
         self._save_config(no_warmup_config, no_warmup_path)
         generated_configs.append(no_warmup_path)
 
         # 7. Full DRS-Hyperspherical (reference)
         full_config = self.base_config.copy()
         full_config["experiment"]["prefix"] = "DRS-Hyperspherical-Full"
-        full_path = os.path.join(self.output_dir, "drs_hyperspherical_full.yaml")
+        full_path = os.path.join(self.output_dir, "drs_hyperspherical_full.json")
         self._save_config(full_config, full_path)
         generated_configs.append(full_path)
 
@@ -384,8 +380,8 @@ class AblationStudyGenerator:
 
     def _save_config(self, config: Dict, path: str):
         """Save configuration to file"""
-        with open(path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
 
 
 def run_comprehensive_ablation(
