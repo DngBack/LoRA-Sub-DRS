@@ -53,3 +53,5 @@ setuptools>=60.0.0
 wheel>=0.37.0
 
 ipdb==0.13.13
+
+scikit-learn==1.7.1

@@ -1,0 +1,102 @@
+# DRS-Hyperspherical Configuration for CIFAR-100
+# Complete configuration following the blueprint from New_idea.md
+
+# Reproducibility
+seed: 1337
+
+# Model Configuration
+model:
+  backbone: "vit_b16" # or "resnet18"
+  net_type: "sip"
+  model_name: "drs_hyperspherical"
+  embd_dim: 768
+  class_num: 5 # Classes per task
+
+# LoRA Configuration
+lora:
+  rank: 16
+  alpha: 16
+  dropout: 0.0
+
+# Dataset Configuration
+dataset:
+  name: "cifar100"
+  init_cls: 50 # Initial classes
+  increment: 5 # Classes per task
+  total_sessions: 11 # Total tasks (1 + 10)
+
+# Training Configuration
+train:
+  # 2-Phase Training
+  epochs_warm: 4 # Warm-up epochs
+  epochs_main: 26 # Main training epochs
+  init_epoch: 20 # Initial task epochs
+  epochs: 30 # Regular task epochs
+
+  # Optimization
+  batch_size: 128
+  lr: 1e-3 # Learning rate
+  init_lr: 1e-3 # Initial task LR
+  fc_lrate: 1e-3 # Classifier LR
+  weight_decay: 1e-5 # Weight decay
+  lrate_decay: 0.1 # LR decay factor
+  init_lr_decay: 0.1 # Initial LR decay
+  optim: "AdamProj" # Optimizer
+
+  # EMA for prototypes
+  ema_momentum: 0.97
+
+# Spherical Geometry Configuration
+spherical:
+  # Prototype Management
+  per_class_prototypes: true
+  multi_anchor: false # Set to true for few-shot scenarios
+  num_anchors: 3 # Number of anchors per class if multi_anchor=true
+
+  # DRS Construction via PCA
+  pca_energy: 0.90 # Energy threshold for PCA
+  k_max: 128 # Maximum PCA components
+
+# Loss Configuration
+loss:
+  # ArcFace Annealing
+  s_start: 10.0 # Initial scale parameter
+  s_end: 30.0 # Final scale parameter
+  m_start: 0.0 # Initial margin
+  m_end: 0.2 # Final margin
+
+  # Angular Triplet Loss
+  triplet_lambda: 0.5 # Weight for triplet loss
+  triplet_margin: 0.2 # Triplet margin
+  triplet_mining: "hard" # Mining strategy: hard, semi_hard, all
+
+  # Regularization
+  label_smoothing: 0.05 # Label smoothing (warmup only)
+  lambada: 0.5 # Weight for augmented triplet loss (original)
+  margin_inter: 0.5 # Margin for augmented triplet loss
+
+# Hardware Configuration
+device:
+  gpu_id: "0"
+  num_workers: 4
+  multiple_gpus: []
+
+# Logging and Evaluation
+logging:
+  eval_interval: 1
+  save_prototypes: true
+  save_U: true # Save PCA components
+  save_path: "./experiments/"
+
+# Experimental Settings
+experiment:
+  prefix: "DRS-Hyperspherical"
+  eval: false
+  debug: false
+
+# Advanced Options
+advanced:
+  EPSILON: 1e-8
+  fixed_lambda: null # For ablation studies
+  use_classifier_alignment: false
+  use_self_distillation: false

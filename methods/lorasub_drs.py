@@ -249,8 +249,20 @@ class LoRAsub_DRS(BaseLearner):
 
         logging.info(f"Computing Fisher Information Matrix for current task...")
 
+        # Create a special dataloader for FIM computation with proper label mapping
+        # We need to use the test_loader or create a new loader with proper labels
+        test_dataset = self.data_manager.get_dataset(
+            np.arange(0, self._total_classes), source="test", mode="test"
+        )
+        fim_loader = DataLoader(
+            test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+        )
+
         # Compute FIM for current task with candidate model
-        current_fim = compute_diagonal_fim(self._network, train_loader, self._device)
+        current_fim = compute_diagonal_fim(self._network, fim_loader, self._device)
 
         # Get accumulated FIM from previous tasks
         accumulated_fim = self.fisher_manager.get_fisher()
@@ -302,7 +314,7 @@ class LoRAsub_DRS(BaseLearner):
             logging.info("lambda_star >= 1.0, keeping candidate model")
 
         # Update Fisher manager with final model's FIM
-        final_fim = compute_diagonal_fim(self._network, train_loader, self._device)
+        final_fim = compute_diagonal_fim(self._network, fim_loader, self._device)
         self.fisher_manager.update_fisher(final_fim)
 
         # Store current final parameters for next task
