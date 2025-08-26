@@ -29,5 +29,14 @@
     "rank": 10,
     "margin_inter": 1.0,
     "lambada": 0.05,
-    "num_workers" : 16
+    "num_workers" : 16,
+    "use_hyperspherical": false,
+    "spcauchy_rho": 0.5,
+    "sphere_dim": 768,
+    "kl_beta": 0.1,
+    "angular_margin": 0.1,
+    "variance_threshold": 0.95,
+    "enable_spherical_projection": false,
+    "save_prototypes": true,
+    "prototype_dir": "./prototypes"
 }
