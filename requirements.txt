@@ -1,0 +1,5 @@
+# Using for python 3.11.4
+geoopt # Or you can use pip install git+https://github.com/geoopt/geoopt.git
+torch==2.0.1
+torchvision==0.15.2
+timm==0.6.7
