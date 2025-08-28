@@ -66,12 +66,22 @@ class ManualStiefel:
     def retraction_qr(X: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
         """QR retraction for Stiefel manifold"""
         Y = X + V
-        Q, R = torch.linalg.qr(Y)
-        # Ensure positive diagonal
-        signs = torch.sign(torch.diagonal(R, dim1=-2, dim2=-1))
-        signs = torch.where(signs == 0, torch.ones_like(signs), signs)
-        Q = Q * signs.unsqueeze(-2)
-        return Q
+        m, n = Y.shape[-2:]
+        
+        # For wide matrices (m < n), we need to use SVD to preserve the full shape
+        # The Stiefel manifold St(m, n) consists of orthonormal m-frames in R^n
+        if m < n:
+            # For wide matrices, use SVD to get orthonormal rows
+            U, S, Vh = torch.linalg.svd(Y, full_matrices=False)
+            return U @ Vh
+        else:
+            # For tall or square matrices, use standard QR
+            Q, R = torch.linalg.qr(Y)
+            # Ensure positive diagonal
+            signs = torch.sign(torch.diagonal(R, dim1=-2, dim2=-1))
+            signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+            Q = Q * signs.unsqueeze(-2)
+            return Q
 
 
 class RiemannianLoRALayer(nn.Module):
@@ -130,9 +140,10 @@ class RiemannianLoRALayer(nn.Module):
         
         # Initialize A matrix
         if self.manifold_A == "stiefel" and self.use_geoopt:
-            # A: rank x input_dim, columns should be orthonormal
-            A_init = torch.randn(self.rank, self.input_dim)
-            A_init = ManualStiefel.retraction_qr(torch.zeros(self.rank, self.input_dim), A_init)
+            # For geoopt Stiefel manifold, we need shape[-1] <= shape[-2]
+            # So we use shape (input_dim, rank) instead of (rank, input_dim)
+            A_init = torch.randn(self.input_dim, self.rank)
+            A_init = ManualStiefel.retraction_qr(torch.zeros(self.input_dim, self.rank), A_init)
             A = ManifoldParameter(A_init, manifold=self.manifold_A_obj)
         elif self.manifold_A == "sphere" and self.use_geoopt:
             # Each row of A on sphere
@@ -184,16 +195,33 @@ class RiemannianLoRALayer(nn.Module):
             # Compute cumulative effect from previous tasks
             cumulative_delta = torch.zeros(self.output_dim, self.input_dim, device=x.device)
             for t in range(task_id):
-                cumulative_delta += self.lora_B[t] @ self.lora_A[t]
+                A_t = self.lora_A[t]
+                B_t = self.lora_B[t]
+                # Handle different A shapes based on manifold
+                if self.manifold_A == "stiefel" and self.use_geoopt:
+                    # A is (input_dim, rank), so we need A.T for the multiplication
+                    cumulative_delta += B_t @ A_t.T
+                else:
+                    # A is (rank, input_dim)
+                    cumulative_delta += B_t @ A_t
             
             # Apply Riemannian subtraction (simplified version)
             # This subtracts the cumulative effect in a direction-preserving way
-            current_delta = B_curr @ A_curr
+            if self.manifold_A == "stiefel" and self.use_geoopt:
+                current_delta = B_curr @ A_curr.T
+            else:
+                current_delta = B_curr @ A_curr
             subtracted_delta = self._riemannian_subtraction(current_delta, cumulative_delta)
             output = F.linear(x, subtracted_delta)
         else:
             # Standard LoRA forward
-            output = F.linear(x, B_curr @ A_curr)
+            if self.manifold_A == "stiefel" and self.use_geoopt:
+                # A is (input_dim, rank), so we need A.T for the multiplication
+                weight_delta = B_curr @ A_curr.T
+            else:
+                # A is (rank, input_dim)
+                weight_delta = B_curr @ A_curr
+            output = F.linear(x, weight_delta)
         
         return output * self.logit_scale
     
@@ -283,11 +311,12 @@ class RiemannianAttention(nn.Module):
         self.register_buffer('n_samples', torch.tensor(0))
         
     def forward(self, x: torch.Tensor, task_id: int, 
-                register_hook: bool = False, collect_features: bool = False) -> torch.Tensor:
+                register_hook: bool = False, get_feat: bool = False, 
+                get_cur_feat: bool = False, get_cur_x: bool = False) -> torch.Tensor:
         B, N, C = x.shape
         
-        # Collect features for covariance if needed
-        if collect_features:
+        # Collect features for covariance if needed (when get_feat is True)
+        if get_feat or get_cur_feat:
             self._update_feature_covariance(x)
         
         # Standard QKV computation

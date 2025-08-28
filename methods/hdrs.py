@@ -40,12 +40,6 @@ class HypersphericalDRS(BaseLearner):
     def __init__(self, args):
         super().__init__(args)
         
-        # Create network with Riemannian attention
-        if args["net_type"] == "sip":
-            self._network = self._create_riemannian_network(args)
-        else:
-            raise ValueError('Unknown net: {}.'.format(args["net_type"]))
-        
         # Hyperparameters
         self.args = args
         self.EPSILON = args["EPSILON"]
@@ -69,6 +63,12 @@ class HypersphericalDRS(BaseLearner):
         self.use_tangent_pca = args.get("use_tangent_pca", True)
         self.drs_energy_threshold = args.get("drs_energy_threshold", 0.99)
         self.drs_max_components = args.get("drs_max_components", 64)
+        
+        # Create network with Riemannian attention
+        if args["net_type"] == "sip":
+            self._network = self._create_riemannian_network(args)
+        else:
+            raise ValueError('Unknown net: {}.'.format(args["net_type"]))
         
         # Prototype storage for classification
         self._protos = []
@@ -107,13 +107,29 @@ class HypersphericalDRS(BaseLearner):
             if hasattr(module, 'attn') and hasattr(module.attn, 'qkv'):
                 # Replace attention with Riemannian version
                 old_attn = module.attn
+                
+                # Extract dropout rates (they are nn.Dropout objects, need to get p attribute)
+                attn_drop_rate = old_attn.attn_drop.p if hasattr(old_attn, 'attn_drop') else 0.0
+                proj_drop_rate = old_attn.proj_drop.p if hasattr(old_attn, 'proj_drop') else 0.0
+                
                 new_attn = RiemannianAttention(
-                    dim=old_attn.qkv.in_features // 3,
+                    dim=old_attn.qkv.in_features,  # Use the actual input dimension, not divided by 3
                     num_heads=getattr(old_attn, 'num_heads', 8),
+                    qkv_bias=getattr(old_attn.qkv, 'bias', None) is not None,
+                    attn_drop=attn_drop_rate,
+                    proj_drop=proj_drop_rate,
                     rank=args["rank"],
                     n_tasks=args["total_sessions"],
                     use_geoopt=self.use_geoopt
                 )
+                # Copy weights from the original attention
+                new_attn.qkv.weight.data.copy_(old_attn.qkv.weight.data)
+                if old_attn.qkv.bias is not None:
+                    new_attn.qkv.bias.data.copy_(old_attn.qkv.bias.data)
+                new_attn.proj.weight.data.copy_(old_attn.proj.weight.data)
+                if old_attn.proj.bias is not None:
+                    new_attn.proj.bias.data.copy_(old_attn.proj.bias.data)
+                
                 setattr(module, 'attn', new_attn)
                 logging.info(f"Replaced attention layer: {name}")
     

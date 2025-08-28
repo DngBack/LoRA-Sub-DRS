@@ -101,7 +101,7 @@ class SiNet(nn.Module):
         # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features
 
-    def forward(self, image, get_feat=False, get_cur_feat=False, get_cur_x=False, fc_only=False):
+    def forward(self, image, task_id=None, get_feat=False, get_cur_feat=False, get_cur_x=False, fc_only=False):
         if fc_only:
             fc_outs = []
             for ti in range(self.numtask):
@@ -109,12 +109,15 @@ class SiNet(nn.Module):
                 fc_outs.append(fc_out)
             return torch.cat(fc_outs, dim=1)
 
+        # Use provided task_id or default to current task
+        current_task = task_id if task_id is not None else (self.numtask - 1)
+        
         logits = []
-        image_features, prompt_loss = self.image_encoder(image, task_id=self.numtask - 1, get_feat=get_feat,
-                                                         get_cur_feat=get_cur_feat,get_cur_x=get_cur_x)
+        image_features, prompt_loss = self.image_encoder(image, task_id=current_task, get_feat=get_feat,
+                                                         get_cur_feat=get_cur_feat, get_cur_x=get_cur_x)
         image_features = image_features[:, 0, :]
         image_features = image_features.view(image_features.size(0), -1)
-        for prompts in [self.classifier_pool[self.numtask - 1]]:
+        for prompts in [self.classifier_pool[current_task]]:
             logits.append(prompts(image_features))
 
         return {
