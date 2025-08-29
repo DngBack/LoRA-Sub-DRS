@@ -1,0 +1,53 @@
+{
+    "prefix": "reproduce",
+    "net_type": "sip",
+    "dataset": "cifar100",
+    "memory_size": 2000,
+    "memory_per_class": 20,
+    "fixed_memory": true,
+    "shuffle": true,
+    "init_cls": 10,
+    "increment": 10,
+    "model_name": "sinet_lora",
+    "convnet_type": "resnet32",
+    "device": ["0"],
+    "seed": [1993],
+    "EPSILON": 1e-8,
+    "init_epoch": 200,
+    "init_lr": 0.1,
+    "epochs": 2,
+    "lrate": 0.1,
+    "milestones": [60, 120, 160],
+    "lrate_decay": 0.1,
+    "batch_size": 16,
+    "weight_decay": 0.0005,
+    "num_workers": 4,
+    "T": 2,
+    "fc_lrate": 0.0,
+    "lambada": 5,
+    "margin_inter": 1.0,
+    "eval": false,
+    
+    "riemannian_config": {
+        "rank": 8,
+        "alpha": 16,
+        "dropout": 0.1,
+        "manifold_A": "stiefel",
+        "manifold_B": "sphere",
+        "use_geoopt": false,
+        "eta_subtraction": 0.05,
+        "use_tangent_pca": true,
+        "drs_energy_threshold": 0.95,
+        "drs_max_components": 16,
+        "enable_memory_optimization": true,
+        "use_flash_attention": true
+    },
+    
+    "performance_config": {
+        "enable_pytorch_optimizations": true,
+        "use_cuda_graphs": false,
+        "gradient_checkpointing": false,
+        "mixed_precision": false,
+        "compile_model": false
+    }
+}

@@ -101,7 +101,7 @@ class SiNet(nn.Module):
         # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features
 
-    def forward(self, image, task_id=None, get_feat=False, get_cur_feat=False, get_cur_x=False, fc_only=False):
+    def forward(self, image, task_id=None, get_feat=False, get_cur_feat=False, get_cur_x=False, fc_only=False, collect_features=False):
         if fc_only:
             fc_outs = []
             for ti in range(self.numtask):
@@ -117,6 +117,14 @@ class SiNet(nn.Module):
                                                          get_cur_feat=get_cur_feat, get_cur_x=get_cur_x)
         image_features = image_features[:, 0, :]
         image_features = image_features.view(image_features.size(0), -1)
+        
+        # If collect_features is True, return features without computing logits
+        if collect_features:
+            return {
+                'features': image_features,
+                'prompt_loss': prompt_loss
+            }
+        
         for prompts in [self.classifier_pool[current_task]]:
             logits.append(prompts(image_features))
 

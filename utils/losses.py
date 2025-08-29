@@ -14,15 +14,14 @@ class AugmentedTripletLoss(nn.Module):
         self.ranking_loss = nn.MarginRankingLoss(margin=margin)
 
     def forward(self, inputs, targets, center):
-        device = (torch.device('cuda')
-                  if inputs.is_cuda
-                  else torch.device('cpu'))
+        # Use the device of the input tensor instead of hardcoding
+        device = inputs.device
         n = inputs.size(0)  # batch_size
 
         # Compute pairwise distance, replace by the official when merged
         dist = torch.pow(inputs, 2).sum(dim=1, keepdim=True).expand(n, n)
         dist = dist + dist.t()
-        dist.addmm_(1, -2, inputs, inputs.t())
+        dist.addmm_(inputs, inputs.t(), beta=1, alpha=-2)
         dist = dist.clamp(min=1e-12).sqrt()  # for numerical stability
 
         # For each anchor, find the hardest positive and negative

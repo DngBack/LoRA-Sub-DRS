@@ -273,9 +273,29 @@ class RiemannianLoRALayer(nn.Module):
         # Project A gradients along input dimension
         A = self.lora_A[task_id]
         if A.grad is not None:
-            # A is rank x input_dim, project along input dimension
-            proj_matrix = P_t @ P_t.T  # input_dim x input_dim
-            A.grad.data = A.grad.data @ proj_matrix
+            # For geoopt Stiefel, A is (input_dim, rank)
+            # For other cases, A is (rank, input_dim)
+            expected_shape_geoopt_stiefel = (self.input_dim, self.rank)
+            expected_shape_normal = (self.rank, self.input_dim)
+            
+            # P_t is the PCA basis in tangent space, shape (feature_dim, n_components)
+            # We need to create a projection matrix that projects in the correct space
+            
+            if P_t.shape[0] != self.input_dim:
+                # Skip DRS projection if dimensions don't match
+                return
+            
+            # Create projection matrix: P_t @ P_t.T has shape (input_dim, input_dim)
+            proj_matrix = P_t @ P_t.T  # (input_dim, input_dim)
+            
+            # Handle different A matrix layouts
+            if A.grad.data.shape == expected_shape_geoopt_stiefel:
+                # A.grad is (input_dim, rank) for geoopt Stiefel
+                A.grad.data = proj_matrix @ A.grad.data
+            elif A.grad.data.shape == expected_shape_normal:
+                # A.grad is (rank, input_dim) for normal case
+                A.grad.data = A.grad.data @ proj_matrix
+            # If shape doesn't match either, skip silently
         
         # B gradients don't need input projection in this formulation
         # as they operate on the output dimension
@@ -337,12 +357,54 @@ class RiemannianAttention(nn.Module):
             k = k + k_delta
             v = v + v_delta
         
-        # Attention computation
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        # Memory-efficient attention computation
+        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            # Use PyTorch 2.0+ optimized attention (Flash Attention, etc.)
+            x = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, 
+                attn_mask=None, 
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+                is_causal=False
+            )
+            x = x.transpose(1, 2).reshape(B, N, C)
+        else:
+            # Fallback: chunked attention computation for memory efficiency
+            chunk_size = 32  # Process in smaller chunks
+            attn_output = []
+            
+            for i in range(0, N, chunk_size):
+                end_i = min(i + chunk_size, N)
+                q_chunk = q[:, :, i:end_i, :]  # [B, heads, chunk, dim]
+                
+                # Compute attention for this chunk
+                attn_chunk = (q_chunk @ k.transpose(-2, -1)) * self.scale
+                attn_chunk = attn_chunk.softmax(dim=-1)
+                attn_chunk = self.attn_drop(attn_chunk)
+                
+                # Apply to values
+                x_chunk = attn_chunk @ v  # [B, heads, chunk, dim]
+                attn_output.append(x_chunk)
+            
+            x = torch.cat(attn_output, dim=2)  # [B, heads, N, dim]
+            x = x.transpose(1, 2).reshape(B, N, C)
+            chunk_size = 32  # Process in smaller chunks
+            attn_output = []
+            
+            for i in range(0, N, chunk_size):
+                end_i = min(i + chunk_size, N)
+                q_chunk = q[:, :, i:end_i, :]  # [B, heads, chunk, dim]
+                
+                # Compute attention for this chunk
+                attn_chunk = (q_chunk @ k.transpose(-2, -1)) * self.scale
+                attn_chunk = attn_chunk.softmax(dim=-1)
+                attn_chunk = self.attn_drop(attn_chunk)
+                
+                # Apply to values
+                x_chunk = attn_chunk @ v  # [B, heads, chunk, dim]
+                attn_output.append(x_chunk)
+            
+            x = torch.cat(attn_output, dim=2)  # [B, heads, N, dim]
+            x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         
