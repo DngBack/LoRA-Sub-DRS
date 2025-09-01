@@ -224,18 +224,25 @@ def sleep_phase_distill(
         epochs: number of distillation epochs
         lr: learning rate for distillation
     """
-    opt = torch.optim.Adam(
-        [p for p in student_model.parameters() if p.requires_grad], lr=lr
-    )
+    # Check if there are trainable parameters
+    trainable_params = [p for p in student_model.parameters() if p.requires_grad]
+    if not trainable_params:
+        print("Warning: No trainable parameters found for sleep phase distillation")
+        return
+
+    opt = torch.optim.Adam(trainable_params, lr=lr)
     mse = nn.MSELoss()
 
     teacher_model.eval()
     student_model.train()
 
+    total_loss = 0.0
+    batch_count = 0
+
     for ep in range(epochs):
         for batch in dataloader:
             if isinstance(batch, (list, tuple)):
-                xb = batch[0].to(device)
+                xb = batch[1].to(device)  # batch[1] is inputs, batch[0] is indices
             else:
                 xb = batch.to(device)
 
@@ -243,11 +250,51 @@ def sleep_phase_distill(
                 t_out = teacher_model(xb)
 
             s_out = student_model(xb)
-            loss = mse(s_out, t_out.detach())
+
+            # Handle both dictionary and tensor outputs
+            if isinstance(t_out, dict) and isinstance(s_out, dict):
+                # Extract logits from both outputs
+                t_logits = t_out.get("logits", t_out.get("output", None))
+                s_logits = s_out.get("logits", s_out.get("output", None))
+
+                if t_logits is not None and s_logits is not None:
+                    loss = mse(s_logits, t_logits.detach())
+                else:
+                    # Fallback: use the first tensor value from dictionaries
+                    t_tensor = next(
+                        (v for v in t_out.values() if torch.is_tensor(v)), None
+                    )
+                    s_tensor = next(
+                        (v for v in s_out.values() if torch.is_tensor(v)), None
+                    )
+
+                    if t_tensor is not None and s_tensor is not None:
+                        loss = mse(s_tensor, t_tensor.detach())
+                    else:
+                        print(
+                            "Warning: Could not find suitable tensors for distillation loss"
+                        )
+                        continue
+            else:
+                # Direct tensor outputs
+                if torch.is_tensor(t_out) and torch.is_tensor(s_out):
+                    loss = mse(s_out, t_out.detach())
+                else:
+                    print("Warning: Unexpected output format for distillation")
+                    continue
 
             opt.zero_grad()
             loss.backward()
             opt.step()
+
+            total_loss += loss.item()
+            batch_count += 1
+
+    if batch_count > 0:
+        avg_loss = total_loss / batch_count
+        print(f"Sleep phase distillation completed. Average loss: {avg_loss:.6f}")
+    else:
+        print("Warning: No batches processed during sleep phase distillation")
 
 
 def get_lora_modules(model):
@@ -285,11 +332,18 @@ def create_noise_loader(
         input_size: input tensor size
 
     Returns:
-        noise_loader: list of noise batches
+        noise_loader: list of noise batches in format (idx, inputs, targets)
     """
     noise_loader = []
-    for _ in range(n_batches):
+    for i in range(n_batches):
         # Create Gaussian noise
         noise = torch.randn(batch_size, *input_size, device=device)
-        noise_loader.append(noise)
+        # Create dummy targets (not used in distillation)
+        dummy_targets = torch.zeros(batch_size, dtype=torch.long, device=device)
+        # Create dummy indices
+        dummy_indices = torch.arange(batch_size, device=device)
+
+        # Format: (idx, inputs, targets) to match expected dataloader format
+        batch = (dummy_indices, noise, dummy_targets)
+        noise_loader.append(batch)
     return noise_loader

@@ -79,10 +79,12 @@ class NeuroLoRA(BaseLearner):
         self.sleep_bs = self.neuro_config.get("sleep_bs", 64)
         self.sleep_batches = self.neuro_config.get("sleep_batches", 10)
         self.sleep_lr = self.neuro_config.get("sleep_lr", 1e-4)
-        
+
         # Bi-directional gradient projection settings
         self.use_bi_directional = self.neuro_config.get("use_bi_directional", True)
-        self.bi_directional_method = self.neuro_config.get("bi_directional_method", "simple")  # "simple" or "full"
+        self.bi_directional_method = self.neuro_config.get(
+            "bi_directional_method", "simple"
+        )  # "simple" or "full"
 
         # Subspace storage
         self.S_cumulative = {}  # layer_name -> tensor (d, K)
@@ -396,7 +398,7 @@ class NeuroLoRA(BaseLearner):
             # Bi-directional gradient projection
             # Group parameters by module for coordinated projection
             module_grads = defaultdict(dict)
-            
+
             # Collect gradients for each module
             for name, param in self._network.named_parameters():
                 if param.grad is not None and ("lora_A" in name or "lora_B" in name):
@@ -412,12 +414,12 @@ class NeuroLoRA(BaseLearner):
                             param_type = "B_k"
                         elif "lora_B_v" in name:
                             param_type = "B_v"
-                        
+
                         if param_type:
                             if module_name not in module_grads:
                                 module_grads[module_name] = {}
                             module_grads[module_name][param_type] = param.grad
-            
+
             # Apply bi-directional projection for each module
             for module_name, grads in module_grads.items():
                 # Project key gradients
@@ -430,7 +432,7 @@ class NeuroLoRA(BaseLearner):
                         if hasattr(module, "get_A_k") and hasattr(module, "get_B_k"):
                             A_k = module.get_A_k()
                             B_k = module.get_B_k()
-                            
+
                             if self.bi_directional_method == "full":
                                 gA_proj, gB_proj = project_grad_bi_directional(
                                     grads["A_k"], grads["B_k"], A_k, B_k, S
@@ -439,14 +441,14 @@ class NeuroLoRA(BaseLearner):
                                 gA_proj, gB_proj = project_grad_bi_directional_simple(
                                     grads["A_k"], grads["B_k"], A_k, B_k, S
                                 )
-                            
+
                             # Update gradients
                             for name, param in self._network.named_parameters():
                                 if f"{module_name}.lora_A_k" in name:
                                     param.grad.data.copy_(gA_proj)
                                 elif f"{module_name}.lora_B_k" in name:
                                     param.grad.data.copy_(gB_proj)
-                
+
                 # Project value gradients
                 if "A_v" in grads and "B_v" in grads:
                     subspace_key = f"{module_name}_v"
@@ -457,7 +459,7 @@ class NeuroLoRA(BaseLearner):
                         if hasattr(module, "get_A_v") and hasattr(module, "get_B_v"):
                             A_v = module.get_A_v()
                             B_v = module.get_B_v()
-                            
+
                             if self.bi_directional_method == "full":
                                 gA_proj, gB_proj = project_grad_bi_directional(
                                     grads["A_v"], grads["B_v"], A_v, B_v, S
@@ -466,7 +468,7 @@ class NeuroLoRA(BaseLearner):
                                 gA_proj, gB_proj = project_grad_bi_directional_simple(
                                     grads["A_v"], grads["B_v"], A_v, B_v, S
                                 )
-                            
+
                             # Update gradients
                             for name, param in self._network.named_parameters():
                                 if f"{module_name}.lora_A_v" in name:
@@ -538,6 +540,14 @@ class NeuroLoRA(BaseLearner):
         """Run sleep-phase consolidation"""
         logging.info("Running sleep-phase consolidation...")
 
+        # Check if there are trainable parameters
+        trainable_params = [p for p in self._network.parameters() if p.requires_grad]
+        if not trainable_params:
+            logging.warning(
+                "No trainable parameters found for sleep phase consolidation"
+            )
+            return
+
         # Create noise dataloader
         noise_loader = create_noise_loader(
             batch_size=self.sleep_bs, n_batches=self.sleep_batches, device=self._device
@@ -549,16 +559,19 @@ class NeuroLoRA(BaseLearner):
             p.requires_grad = False
 
         # Run distillation
-        sleep_phase_distill(
-            teacher_model,
-            self._network,
-            noise_loader,
-            device=self._device,
-            epochs=self.sleep_epochs,
-            lr=self.sleep_lr,
-        )
-
-        logging.info("Sleep-phase consolidation completed")
+        try:
+            sleep_phase_distill(
+                teacher_model,
+                self._network,
+                noise_loader,
+                device=self._device,
+                epochs=self.sleep_epochs,
+                lr=self.sleep_lr,
+            )
+            logging.info("Sleep-phase consolidation completed successfully")
+        except Exception as e:
+            logging.error(f"Error during sleep phase consolidation: {e}")
+            logging.info("Continuing without sleep phase consolidation")
 
     def _build_protos(self):
         """Build prototypes for triplet loss"""
