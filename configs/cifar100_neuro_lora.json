@@ -39,6 +39,8 @@
         "sleep_epochs": 0,
         "sleep_bs": 64,
         "sleep_batches": 10,
-        "sleep_lr": 1e-4
+        "sleep_lr": 1e-4,
+        "use_bi_directional": true,
+        "bi_directional_method": "simple"
     }
 }

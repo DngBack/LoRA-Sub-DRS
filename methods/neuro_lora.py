@@ -19,6 +19,8 @@ from utils.neuro_utils import (
     extract_subspace_from_BA,
     merge_cumulative_subspace,
     project_grad_B,
+    project_grad_bi_directional,
+    project_grad_bi_directional_simple,
     compute_plasticity_loss,
     save_subspace,
     load_subspace,
@@ -77,6 +79,10 @@ class NeuroLoRA(BaseLearner):
         self.sleep_bs = self.neuro_config.get("sleep_bs", 64)
         self.sleep_batches = self.neuro_config.get("sleep_batches", 10)
         self.sleep_lr = self.neuro_config.get("sleep_lr", 1e-4)
+        
+        # Bi-directional gradient projection settings
+        self.use_bi_directional = self.neuro_config.get("use_bi_directional", True)
+        self.bi_directional_method = self.neuro_config.get("bi_directional_method", "simple")  # "simple" or "full"
 
         # Subspace storage
         self.S_cumulative = {}  # layer_name -> tensor (d, K)
@@ -363,27 +369,110 @@ class NeuroLoRA(BaseLearner):
         logging.info(info)
 
     def _project_gradients(self):
-        """Project gradients of B matrices to orthogonal complement of cumulative subspaces"""
-        for name, param in self._network.named_parameters():
-            if param.grad is not None and "lora_B" in name:
-                # Extract module name and projection type (k or v)
-                parts = name.split(".")
-                if len(parts) >= 2:
-                    module_name = parts[0]
-                    proj_type = (
-                        "k"
-                        if "lora_B_k" in name
-                        else "v"
-                        if "lora_B_v" in name
-                        else None
-                    )
+        """Project gradients using bi-directional projection for better subspace protection"""
+        if not self.use_bi_directional:
+            # Fallback to original method (only B projection)
+            for name, param in self._network.named_parameters():
+                if param.grad is not None and "lora_B" in name:
+                    # Extract module name and projection type (k or v)
+                    parts = name.split(".")
+                    if len(parts) >= 2:
+                        module_name = parts[0]
+                        proj_type = (
+                            "k"
+                            if "lora_B_k" in name
+                            else "v"
+                            if "lora_B_v" in name
+                            else None
+                        )
 
-                    if proj_type:
-                        subspace_key = f"{module_name}_{proj_type}"
-                        S = self.S_cumulative.get(subspace_key, None)
-                        if S is not None:
-                            gB_proj = project_grad_B(param.grad, S)
-                            param.grad.data.copy_(gB_proj)
+                        if proj_type:
+                            subspace_key = f"{module_name}_{proj_type}"
+                            S = self.S_cumulative.get(subspace_key, None)
+                            if S is not None:
+                                gB_proj = project_grad_B(param.grad, S)
+                                param.grad.data.copy_(gB_proj)
+        else:
+            # Bi-directional gradient projection
+            # Group parameters by module for coordinated projection
+            module_grads = defaultdict(dict)
+            
+            # Collect gradients for each module
+            for name, param in self._network.named_parameters():
+                if param.grad is not None and ("lora_A" in name or "lora_B" in name):
+                    parts = name.split(".")
+                    if len(parts) >= 2:
+                        module_name = parts[0]
+                        param_type = None
+                        if "lora_A_k" in name:
+                            param_type = "A_k"
+                        elif "lora_A_v" in name:
+                            param_type = "A_v"
+                        elif "lora_B_k" in name:
+                            param_type = "B_k"
+                        elif "lora_B_v" in name:
+                            param_type = "B_v"
+                        
+                        if param_type:
+                            if module_name not in module_grads:
+                                module_grads[module_name] = {}
+                            module_grads[module_name][param_type] = param.grad
+            
+            # Apply bi-directional projection for each module
+            for module_name, grads in module_grads.items():
+                # Project key gradients
+                if "A_k" in grads and "B_k" in grads:
+                    subspace_key = f"{module_name}_k"
+                    S = self.S_cumulative.get(subspace_key, None)
+                    if S is not None:
+                        # Get current A and B matrices for this module
+                        module = self._network.get_submodule(module_name)
+                        if hasattr(module, "get_A_k") and hasattr(module, "get_B_k"):
+                            A_k = module.get_A_k()
+                            B_k = module.get_B_k()
+                            
+                            if self.bi_directional_method == "full":
+                                gA_proj, gB_proj = project_grad_bi_directional(
+                                    grads["A_k"], grads["B_k"], A_k, B_k, S
+                                )
+                            else:  # simple method
+                                gA_proj, gB_proj = project_grad_bi_directional_simple(
+                                    grads["A_k"], grads["B_k"], A_k, B_k, S
+                                )
+                            
+                            # Update gradients
+                            for name, param in self._network.named_parameters():
+                                if f"{module_name}.lora_A_k" in name:
+                                    param.grad.data.copy_(gA_proj)
+                                elif f"{module_name}.lora_B_k" in name:
+                                    param.grad.data.copy_(gB_proj)
+                
+                # Project value gradients
+                if "A_v" in grads and "B_v" in grads:
+                    subspace_key = f"{module_name}_v"
+                    S = self.S_cumulative.get(subspace_key, None)
+                    if S is not None:
+                        # Get current A and B matrices for this module
+                        module = self._network.get_submodule(module_name)
+                        if hasattr(module, "get_A_v") and hasattr(module, "get_B_v"):
+                            A_v = module.get_A_v()
+                            B_v = module.get_B_v()
+                            
+                            if self.bi_directional_method == "full":
+                                gA_proj, gB_proj = project_grad_bi_directional(
+                                    grads["A_v"], grads["B_v"], A_v, B_v, S
+                                )
+                            else:  # simple method
+                                gA_proj, gB_proj = project_grad_bi_directional_simple(
+                                    grads["A_v"], grads["B_v"], A_v, B_v, S
+                                )
+                            
+                            # Update gradients
+                            for name, param in self._network.named_parameters():
+                                if f"{module_name}.lora_A_v" in name:
+                                    param.grad.data.copy_(gA_proj)
+                                elif f"{module_name}.lora_B_v" in name:
+                                    param.grad.data.copy_(gB_proj)
 
     def _extract_and_save_subspaces(self):
         """Extract new subspaces and merge with cumulative subspaces"""
