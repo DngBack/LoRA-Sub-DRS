@@ -47,10 +47,13 @@ class _LRScheduler(object):
 class CosineSchedule(_LRScheduler):
 
     def __init__(self, optimizer, K):
-        self.K = K
+        self.K = max(K, 2)  # Ensure K >= 2 to avoid division by zero
         super().__init__(optimizer, -1)
 
     def cosine(self, base_lr):
+        # Avoid division by zero when K-1 = 0
+        if self.K <= 1:
+            return base_lr
         return base_lr * math.cos((99 * math.pi * (self.last_epoch)) / (200 * (self.K-1)))
 
     def get_lr(self):

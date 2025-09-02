@@ -315,6 +315,80 @@ class Attention_LoRA(nn.Module):
                                    dim=0).sum(dim=0)
         return weight_k, weight_v
 
+    # --- Neuro-LoRA helper methods ---
+    
+    def get_current_task(self):
+        """Get current task ID (assuming it's tracked externally)"""
+        # This should be set by the training loop
+        return getattr(self, '_current_task', 0)
+    
+    def set_current_task(self, task_id):
+        """Set current task ID"""
+        self._current_task = task_id
+    
+    def get_A_k(self, task_id=None):
+        """Get LoRA A matrix for key projection"""
+        if task_id is None:
+            task_id = self.get_current_task()
+        return self.lora_A_k[task_id].weight
+    
+    def get_B_k(self, task_id=None):
+        """Get LoRA B matrix for key projection"""
+        if task_id is None:
+            task_id = self.get_current_task()
+        return self.lora_B_k[task_id].weight
+    
+    def get_A_v(self, task_id=None):
+        """Get LoRA A matrix for value projection"""
+        if task_id is None:
+            task_id = self.get_current_task()
+        return self.lora_A_v[task_id].weight
+    
+    def get_B_v(self, task_id=None):
+        """Get LoRA B matrix for value projection"""
+        if task_id is None:
+            task_id = self.get_current_task()
+        return self.lora_B_v[task_id].weight
+    
+    def get_delta_k(self, task_id=None):
+        """Get composite delta matrix for key projection: B @ A"""
+        if task_id is None:
+            task_id = self.get_current_task()
+        return torch.mm(self.lora_B_k[task_id].weight, self.lora_A_k[task_id].weight)
+    
+    def get_delta_v(self, task_id=None):
+        """Get composite delta matrix for value projection: B @ A"""
+        if task_id is None:
+            task_id = self.get_current_task()
+        return torch.mm(self.lora_B_v[task_id].weight, self.lora_A_v[task_id].weight)
+    
+    def freeze_previous_tasks(self, current_task):
+        """Freeze LoRA parameters from previous tasks"""
+        for t in range(len(self.lora_A_k)):
+            if t < current_task:
+                self.lora_A_k[t].weight.requires_grad_(False)
+                self.lora_B_k[t].weight.requires_grad_(False)
+                self.lora_A_v[t].weight.requires_grad_(False)
+                self.lora_B_v[t].weight.requires_grad_(False)
+    
+    def unfreeze_current_task(self, current_task):
+        """Unfreeze LoRA parameters for current task"""
+        if current_task < len(self.lora_A_k):
+            self.lora_A_k[current_task].weight.requires_grad_(True)
+            self.lora_B_k[current_task].weight.requires_grad_(True)
+            self.lora_A_v[current_task].weight.requires_grad_(True)
+            self.lora_B_v[current_task].weight.requires_grad_(True)
+    
+    def get_lora_activation_k(self, x):
+        """Get LoRA activation for key projection (for plasticity loss)"""
+        task_id = self.get_current_task()
+        return self.lora_A_k[task_id](x)
+    
+    def get_lora_activation_v(self, x):
+        """Get LoRA activation for value projection (for plasticity loss)"""
+        task_id = self.get_current_task()
+        return self.lora_A_v[task_id](x)
+
 
 class LayerScale(nn.Module):
     def __init__(self, dim, init_values=1e-5, inplace=False):
