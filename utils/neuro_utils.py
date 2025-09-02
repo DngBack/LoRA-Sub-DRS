@@ -179,6 +179,125 @@ def project_grad_bi_directional_simple(
     return gA_proj, gB_proj
 
 
+def project_grad_delta_w(
+    gA: torch.Tensor,
+    gB: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    S: torch.Tensor,
+):
+    """
+    ΔW-Projected Bi-directional Gradient Projection
+
+    Instead of projecting A and B gradients separately, we:
+    1. Compute the total gradient of ΔW = BA
+    2. Project this total gradient out of the protected subspace
+    3. Backsolve to get projected A and B gradients
+
+    Args:
+        gA: gradient of A matrix (r, d)
+        gB: gradient of B matrix (d, r)
+        A: current A matrix (r, d)
+        B: current B matrix (d, r)
+        S: cumulative subspace (d, K)
+
+    Returns:
+        gA_proj: projected gradient of A
+        gB_proj: projected gradient of B
+    """
+    if S is None or S.numel() == 0:
+        return gA, gB
+
+    # Step 1: Compute total gradient of ΔW = BA
+    # ∇(ΔW) = B⋅∇A + ∇B⋅A
+    grad_delta_w = torch.matmul(B, gA) + torch.matmul(gB, A)  # (d, d)
+
+    # Step 2: Project ∇(ΔW) out of the protected subspace
+    # proj_grad = grad_delta_w - S(S^T grad_delta_w)
+    coef = torch.matmul(S.T, grad_delta_w)  # (K, d)
+    proj_grad_delta_w = grad_delta_w - torch.matmul(S, coef)  # (d, d)
+
+    # Step 3: Backsolve for A and B gradients
+    # We solve: B⋅∇A + ∇B⋅A ≈ proj_grad_delta_w
+    # Using pseudo-inverse approach
+
+    # Method 1: Solve for ∇A first (freeze B)
+    try:
+        B_pinv = torch.linalg.pinv(B)  # (r, d)
+        gA_proj = torch.matmul(B_pinv, proj_grad_delta_w)  # (r, d)
+    except:
+        # Fallback if pseudo-inverse fails
+        gA_proj = gA
+
+    # Method 2: Solve for ∇B (freeze A)
+    try:
+        A_pinv = torch.linalg.pinv(A)  # (d, r)
+        gB_proj = torch.matmul(proj_grad_delta_w, A_pinv)  # (d, r)
+    except:
+        # Fallback if pseudo-inverse fails
+        gB_proj = gB
+
+    return gA_proj, gB_proj
+
+
+def extract_subspace_adaptive_k(
+    B: torch.Tensor, A: torch.Tensor, energy_threshold: float = 0.95, k_max: int = None
+):
+    """
+    Extract subspace with adaptive k based on energy retention
+
+    Args:
+        B: (d, r) - LoRA B matrix
+        A: (r, d) - LoRA A matrix
+        energy_threshold: minimum energy retention ratio (default: 0.95)
+        k_max: maximum number of vectors to extract (default: None)
+
+    Returns:
+        S_new: (d, k) with orthonormal columns, where k is adaptively chosen
+    """
+    assert B.ndim == 2 and A.ndim == 2
+    d, r = B.shape
+
+    # Compute ΔW = BA
+    delta_w = torch.matmul(B, A)  # (d, d)
+
+    # Perform SVD on ΔW
+    try:
+        U, S, Vt = torch.linalg.svd(delta_w)  # U: (d, d), S: (d,)
+    except Exception:  # fallback for older torch versions
+        U, S, Vt = torch.svd(delta_w)
+
+    # Calculate total energy
+    total_energy = S.sum()
+
+    # Calculate cumulative energy ratio
+    cumulative_energy = torch.cumsum(S, dim=0)
+    energy_ratio = cumulative_energy / total_energy
+
+    # Find minimum k such that energy_ratio >= threshold
+    k_indices = (energy_ratio >= energy_threshold).nonzero(as_tuple=False)
+    if k_indices.numel() > 0:
+        adaptive_k = k_indices[0].item() + 1  # +1 because indices are 0-based
+    else:
+        adaptive_k = min(r, d)  # fallback to full rank
+
+    # Apply k_max constraint if specified
+    if k_max is not None:
+        adaptive_k = min(adaptive_k, k_max)
+
+    # Ensure at least 1 vector
+    adaptive_k = max(adaptive_k, 1)
+
+    # Extract top-k left singular vectors
+    S_new = U[:, :adaptive_k]  # (d, adaptive_k)
+
+    # Orthonormalize using QR decomposition
+    Q, _ = torch.linalg.qr(S_new)
+    S_new = Q[:, :adaptive_k]
+
+    return S_new
+
+
 def compute_plasticity_loss(lora_activation: torch.Tensor, eps=1e-8):
     """
     Compute homeostatic plasticity loss based on activation distribution

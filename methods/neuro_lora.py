@@ -17,10 +17,12 @@ from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy, accuracy
 from utils.neuro_utils import (
     extract_subspace_from_BA,
+    extract_subspace_adaptive_k,
     merge_cumulative_subspace,
     project_grad_B,
     project_grad_bi_directional,
     project_grad_bi_directional_simple,
+    project_grad_delta_w,
     compute_plasticity_loss,
     save_subspace,
     load_subspace,
@@ -52,11 +54,11 @@ class NeuroLoRA(BaseLearner):
         # Store arguments
         self.args = args
         self.EPSILON = args["EPSILON"]
-        self.init_epoch = args["init_epoch"]
+        self.init_epoch = max(args["init_epoch"], 1)  # Ensure at least 1 epoch
         self.init_lr = args["init_lr"]
         self.init_lr_decay = args["init_lr_decay"]
         self.init_weight_decay = args["init_weight_decay"]
-        self.epochs = args["epochs"]
+        self.epochs = max(args["epochs"], 1)  # Ensure at least 1 epoch
         self.lrate = args["lrate"]
         self.lrate_decay = args["lrate_decay"]
         self.batch_size = args["batch_size"]
@@ -84,7 +86,11 @@ class NeuroLoRA(BaseLearner):
         self.use_bi_directional = self.neuro_config.get("use_bi_directional", True)
         self.bi_directional_method = self.neuro_config.get(
             "bi_directional_method", "simple"
-        )  # "simple" or "full"
+        )  # "simple", "full", or "delta_w_projected"
+
+        # Adaptive-k subspace building settings
+        self.adaptive_k_enabled = self.neuro_config.get("adaptive_k_enabled", False)
+        self.energy_threshold = self.neuro_config.get("energy_threshold", 0.95)
 
         # Subspace storage
         self.S_cumulative = {}  # layer_name -> tensor (d, K)
@@ -194,10 +200,10 @@ class NeuroLoRA(BaseLearner):
 
         # Set training epochs
         if self._cur_task == 0:
-            self.run_epoch = self.init_epoch
+            self.run_epoch = max(self.init_epoch, 1)  # Ensure at least 1 epoch
         else:
             self.update_optim_transforms()
-            self.run_epoch = self.epochs
+            self.run_epoch = max(self.epochs, 1)  # Ensure at least 1 epoch
 
         # Training loop
         self.train_function(train_loader, test_loader)
@@ -295,7 +301,9 @@ class NeuroLoRA(BaseLearner):
 
     def train_function(self, train_loader, test_loader):
         """Main training loop with Neuro-LoRA components"""
-        prog_bar = tqdm(range(self.run_epoch))
+        # Ensure at least 1 epoch to avoid empty range
+        epochs_to_run = max(self.run_epoch, 1)
+        prog_bar = tqdm(range(epochs_to_run))
         criterion = AugmentedTripletLoss(margin=self.margin_inter).to(self._device)
 
         for _, epoch in enumerate(prog_bar):
@@ -433,7 +441,11 @@ class NeuroLoRA(BaseLearner):
                             A_k = module.get_A_k()
                             B_k = module.get_B_k()
 
-                            if self.bi_directional_method == "full":
+                            if self.bi_directional_method == "delta_w_projected":
+                                gA_proj, gB_proj = project_grad_delta_w(
+                                    grads["A_k"], grads["B_k"], A_k, B_k, S
+                                )
+                            elif self.bi_directional_method == "full":
                                 gA_proj, gB_proj = project_grad_bi_directional(
                                     grads["A_k"], grads["B_k"], A_k, B_k, S
                                 )
@@ -460,7 +472,11 @@ class NeuroLoRA(BaseLearner):
                             A_v = module.get_A_v()
                             B_v = module.get_B_v()
 
-                            if self.bi_directional_method == "full":
+                            if self.bi_directional_method == "delta_w_projected":
+                                gA_proj, gB_proj = project_grad_delta_w(
+                                    grads["A_v"], grads["B_v"], A_v, B_v, S
+                                )
+                            elif self.bi_directional_method == "full":
                                 gA_proj, gB_proj = project_grad_bi_directional(
                                     grads["A_v"], grads["B_v"], A_v, B_v, S
                                 )
@@ -491,12 +507,30 @@ class NeuroLoRA(BaseLearner):
                 # Extract subspaces for key projection
                 A_k = module.get_A_k()
                 B_k = module.get_B_k()
-                S_k_new = extract_subspace_from_BA(B_k, A_k, self.k_per_task)
+
+                if self.adaptive_k_enabled:
+                    S_k_new = extract_subspace_adaptive_k(
+                        B_k,
+                        A_k,
+                        energy_threshold=self.energy_threshold,
+                        k_max=self.k_per_task,
+                    )
+                else:
+                    S_k_new = extract_subspace_from_BA(B_k, A_k, self.k_per_task)
 
                 # Extract subspaces for value projection
                 A_v = module.get_A_v()
                 B_v = module.get_B_v()
-                S_v_new = extract_subspace_from_BA(B_v, A_v, self.k_per_task)
+
+                if self.adaptive_k_enabled:
+                    S_v_new = extract_subspace_adaptive_k(
+                        B_v,
+                        A_v,
+                        energy_threshold=self.energy_threshold,
+                        k_max=self.k_per_task,
+                    )
+                else:
+                    S_v_new = extract_subspace_from_BA(B_v, A_v, self.k_per_task)
 
                 # Merge with cumulative subspaces
                 S_k_cum = self.S_cumulative.get(f"{name}_k", None)
@@ -670,7 +704,9 @@ class NeuroLoRA(BaseLearner):
         self.model_optimizer = getattr(optimgrad, self.args["optim"])(
             **model_optimizer_arg
         )
-        self.model_scheduler = CosineSchedule(self.model_optimizer, K=self.epochs)
+        # Ensure epochs is at least 2 to avoid division by zero in CosineSchedule
+        scheduler_epochs = max(self.epochs, 2)
+        self.model_scheduler = CosineSchedule(self.model_optimizer, K=scheduler_epochs)
 
     def update_optim_transforms(self):
         """Update optimizer and transforms for incremental learning"""
