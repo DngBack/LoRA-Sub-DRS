@@ -23,9 +23,12 @@ from utils.neuro_utils import (
     project_grad_bi_directional,
     project_grad_bi_directional_simple,
     project_grad_delta_w,
+    project_grad_similarity_aware,
     compute_plasticity_loss,
     save_subspace,
     load_subspace,
+    save_delta_w_history,
+    load_delta_w_history,
     sleep_phase_distill,
     get_lora_modules,
     create_noise_loader,
@@ -92,8 +95,17 @@ class NeuroLoRA(BaseLearner):
         self.adaptive_k_enabled = self.neuro_config.get("adaptive_k_enabled", False)
         self.energy_threshold = self.neuro_config.get("energy_threshold", 0.95)
 
+        # Task Similarity-aware Drift Correction (TSDC) settings
+        self.tsdc_enabled = self.neuro_config.get("tsdc_enabled", False)
+        self.similarity_method = self.neuro_config.get("similarity_method", "cosine")
+        self.similarity_decay = self.neuro_config.get("similarity_decay", 1.0)
+        self.min_projection_strength = self.neuro_config.get(
+            "min_projection_strength", 0.1
+        )
+
         # Subspace storage
         self.S_cumulative = {}  # layer_name -> tensor (d, K)
+        self.delta_w_history = []  # List of ΔW matrices from previous tasks
         self.checkpoint_dir = args.get("checkpoint_dir", "logs/neuro_lora")
         self.fea_in = defaultdict(dict)
 
@@ -164,8 +176,9 @@ class NeuroLoRA(BaseLearner):
             if hasattr(module, "set_current_task"):
                 module.set_current_task(self._cur_task)
 
-        # Load cumulative subspaces from previous tasks
+        # Load cumulative subspaces and ΔW history from previous tasks
         self._load_cumulative_subspaces()
+        self._load_delta_w_history()
 
         # Setup parameter freezing/unfreezing
         self._setup_parameter_training()
@@ -210,6 +223,9 @@ class NeuroLoRA(BaseLearner):
 
         # Extract and save subspaces after training
         self._extract_and_save_subspaces()
+
+        # Save current task's ΔW to history
+        self._save_current_delta_w()
 
         # Optional sleep phase
         if self.sleep_epochs > 0:
@@ -441,7 +457,34 @@ class NeuroLoRA(BaseLearner):
                             A_k = module.get_A_k()
                             B_k = module.get_B_k()
 
-                            if self.bi_directional_method == "delta_w_projected":
+                            if self.tsdc_enabled and self.delta_w_history:
+                                # Use similarity-aware projection
+                                current_delta_w = torch.matmul(B_k, A_k)
+                                gA_proj, gB_proj, alpha = project_grad_similarity_aware(
+                                    grads["A_k"],
+                                    grads["B_k"],
+                                    A_k,
+                                    B_k,
+                                    S,
+                                    current_delta_w,
+                                    self.delta_w_history,
+                                    similarity_method=self.similarity_method,
+                                    similarity_decay=self.similarity_decay,
+                                    min_projection_strength=self.min_projection_strength,
+                                )
+                                # Log similarity info occasionally
+                                if hasattr(self, "_log_counter"):
+                                    self._log_counter += 1
+                                else:
+                                    self._log_counter = 0
+
+                                if (
+                                    self._log_counter % 100 == 0
+                                ):  # Log every 100 batches
+                                    logging.info(
+                                        f"Task similarity: {alpha:.3f} (task {self._cur_task})"
+                                    )
+                            elif self.bi_directional_method == "delta_w_projected":
                                 gA_proj, gB_proj = project_grad_delta_w(
                                     grads["A_k"], grads["B_k"], A_k, B_k, S
                                 )
@@ -472,7 +515,22 @@ class NeuroLoRA(BaseLearner):
                             A_v = module.get_A_v()
                             B_v = module.get_B_v()
 
-                            if self.bi_directional_method == "delta_w_projected":
+                            if self.tsdc_enabled and self.delta_w_history:
+                                # Use similarity-aware projection
+                                current_delta_w = torch.matmul(B_v, A_v)
+                                gA_proj, gB_proj, alpha = project_grad_similarity_aware(
+                                    grads["A_v"],
+                                    grads["B_v"],
+                                    A_v,
+                                    B_v,
+                                    S,
+                                    current_delta_w,
+                                    self.delta_w_history,
+                                    similarity_method=self.similarity_method,
+                                    similarity_decay=self.similarity_decay,
+                                    min_projection_strength=self.min_projection_strength,
+                                )
+                            elif self.bi_directional_method == "delta_w_projected":
                                 gA_proj, gB_proj = project_grad_delta_w(
                                     grads["A_v"], grads["B_v"], A_v, B_v, S
                                 )
@@ -569,6 +627,50 @@ class NeuroLoRA(BaseLearner):
                 )
 
         logging.info(f"Subspace extraction completed for task {self._cur_task}")
+
+    def _load_delta_w_history(self):
+        """Load ΔW history from previous tasks"""
+        if self._cur_task > 0:
+            history_path = os.path.join(self.checkpoint_dir, "delta_w_history.pt")
+            self.delta_w_history = load_delta_w_history(history_path, self._device)
+            logging.info(
+                f"Loaded ΔW history with {len(self.delta_w_history)} previous tasks"
+            )
+        else:
+            self.delta_w_history = []
+
+    def _save_current_delta_w(self):
+        """Save current task's ΔW to history"""
+        current_delta_w = {}
+
+        for name, module in get_lora_modules(self._network):
+            if hasattr(module, "get_A_k") and hasattr(module, "get_B_k"):
+                # Get current ΔW for this module
+                A_k = module.get_A_k()
+                B_k = module.get_B_k()
+                delta_w_k = torch.matmul(B_k, A_k)
+
+                A_v = module.get_A_v()
+                B_v = module.get_B_v()
+                delta_w_v = torch.matmul(B_v, A_v)
+
+                # Average key and value ΔW for this module
+                delta_w_avg = (delta_w_k + delta_w_v) / 2
+                current_delta_w[name] = delta_w_avg.detach().clone()
+
+        # For simplicity, we'll use the first module's ΔW as representative
+        if current_delta_w:
+            first_module_name = list(current_delta_w.keys())[0]
+            representative_delta_w = current_delta_w[first_module_name]
+            self.delta_w_history.append(representative_delta_w)
+
+            # Save updated history
+            history_path = os.path.join(self.checkpoint_dir, "delta_w_history.pt")
+            save_delta_w_history(self.delta_w_history, history_path)
+
+            logging.info(
+                f"Saved ΔW for task {self._cur_task}, history now has {len(self.delta_w_history)} tasks"
+            )
 
     def _run_sleep_phase(self):
         """Run sleep-phase consolidation"""

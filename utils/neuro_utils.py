@@ -466,3 +466,175 @@ def create_noise_loader(
         batch = (dummy_indices, noise, dummy_targets)
         noise_loader.append(batch)
     return noise_loader
+
+
+def compute_task_similarity(
+    delta_w_current: torch.Tensor, delta_w_history: list, method: str = "cosine"
+):
+    """
+    Compute similarity between current task's ΔW and previous tasks' ΔW
+
+    Args:
+        delta_w_current: current task's ΔW matrix (d, d)
+        delta_w_history: list of previous tasks' ΔW matrices [(d, d), ...]
+        method: similarity method ("cosine" or "frobenius")
+
+    Returns:
+        similarity_score: average similarity score [0, 1]
+    """
+    if not delta_w_history:
+        return torch.tensor(0.0, device=delta_w_current.device)
+
+    similarities = []
+
+    for delta_w_prev in delta_w_history:
+        if method == "cosine":
+            # Flatten matrices and compute cosine similarity
+            curr_flat = delta_w_current.flatten()
+            prev_flat = delta_w_prev.flatten()
+
+            # Normalize to unit vectors
+            curr_norm = torch.norm(curr_flat)
+            prev_norm = torch.norm(prev_flat)
+
+            if curr_norm > 1e-8 and prev_norm > 1e-8:
+                sim = torch.dot(curr_flat, prev_flat) / (curr_norm * prev_norm)
+                # Convert from [-1, 1] to [0, 1] range
+                sim = (sim + 1) / 2
+            else:
+                sim = torch.tensor(
+                    0.5, device=delta_w_current.device
+                )  # neutral similarity
+
+        elif method == "frobenius":
+            # Frobenius norm-based similarity
+            curr_norm = torch.norm(delta_w_current, p="fro")
+            prev_norm = torch.norm(delta_w_prev, p="fro")
+
+            if curr_norm > 1e-8 and prev_norm > 1e-8:
+                # Normalize both matrices
+                curr_normalized = delta_w_current / curr_norm
+                prev_normalized = delta_w_prev / prev_norm
+
+                # Compute similarity as dot product of flattened normalized matrices
+                sim = torch.dot(curr_normalized.flatten(), prev_normalized.flatten())
+                sim = (sim + 1) / 2  # Convert to [0, 1]
+            else:
+                sim = torch.tensor(0.5, device=delta_w_current.device)
+        else:
+            raise ValueError(f"Unknown similarity method: {method}")
+
+        similarities.append(sim)
+
+    # Return average similarity
+    return torch.stack(similarities).mean()
+
+
+def project_grad_similarity_aware(
+    gA: torch.Tensor,
+    gB: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    S: torch.Tensor,
+    delta_w_current: torch.Tensor,
+    delta_w_history: list,
+    similarity_method: str = "cosine",
+    similarity_decay: float = 1.0,
+    min_projection_strength: float = 0.1,
+):
+    """
+    Similarity-aware gradient projection
+
+    Args:
+        gA, gB: gradients of A and B matrices
+        A, B: current A and B matrices
+        S: cumulative subspace
+        delta_w_current: current task's ΔW matrix
+        delta_w_history: list of previous tasks' ΔW matrices
+        similarity_method: "cosine" or "frobenius"
+        similarity_decay: power to apply to similarity (β in α = sim^β)
+        min_projection_strength: minimum projection strength (0.1 = always project at least 10%)
+
+    Returns:
+        gA_proj, gB_proj: similarity-aware projected gradients
+    """
+    if S is None or S.numel() == 0:
+        return gA, gB
+
+    # Compute task similarity
+    similarity = compute_task_similarity(
+        delta_w_current, delta_w_history, method=similarity_method
+    )
+
+    # Apply decay and clamp to get projection strength
+    alpha = (similarity**similarity_decay).clamp(min=min_projection_strength, max=1.0)
+
+    # Compute total gradient of ΔW = BA
+    grad_delta_w = torch.matmul(B, gA) + torch.matmul(gB, A)  # (d, d)
+
+    # Apply similarity-aware projection
+    # g_proj = g - α * (S @ (S.T @ g))
+    coef = torch.matmul(S.T, grad_delta_w)  # (K, d)
+    proj_grad_delta_w = grad_delta_w - alpha * torch.matmul(S, coef)  # (d, d)
+
+    # Backsolve for A and B gradients
+    try:
+        B_pinv = torch.linalg.pinv(B)
+        gA_proj = torch.matmul(B_pinv, proj_grad_delta_w)
+    except:
+        gA_proj = gA
+
+    try:
+        A_pinv = torch.linalg.pinv(A)
+        gB_proj = torch.matmul(proj_grad_delta_w, A_pinv)
+    except:
+        gB_proj = gB
+
+    return gA_proj, gB_proj, alpha.item()
+
+
+def save_delta_w_history(delta_w_history: list, save_path: str):
+    """
+    Save ΔW history to disk
+
+    Args:
+        delta_w_history: list of ΔW tensors
+        save_path: path to save the history
+    """
+    import os
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # Convert to list of numpy arrays for saving
+    delta_w_numpy = [dw.cpu().numpy() for dw in delta_w_history]
+    torch.save(delta_w_numpy, save_path)
+
+
+def load_delta_w_history(load_path: str, device: str = "cpu"):
+    """
+    Load ΔW history from disk
+
+    Args:
+        load_path: path to load the history from
+        device: device to load tensors to
+
+    Returns:
+        delta_w_history: list of ΔW tensors
+    """
+    if not os.path.exists(load_path):
+        return []
+
+    try:
+        # Try with weights_only=False for PyTorch 2.6 compatibility
+        try:
+            delta_w_numpy = torch.load(
+                load_path, map_location=device, weights_only=False
+            )
+        except TypeError:
+            # Fallback for older PyTorch versions
+            delta_w_numpy = torch.load(load_path, map_location=device)
+        delta_w_history = [torch.tensor(dw, device=device) for dw in delta_w_numpy]
+        return delta_w_history
+    except Exception as e:
+        print(f"Warning: Could not load delta_w_history from {load_path}: {e}")
+        return []
